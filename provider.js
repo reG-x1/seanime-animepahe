@@ -14,6 +14,12 @@ var UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, l
 // full Cookie header from your browser's dev tools (Network tab) and paste it here.
 var FALLBACK_COOKIE = "__ddg1_=; __ddg2_=;";
 
+// If Animepahe keeps answering 403, open it in your browser, press F12 -> Network,
+// reload, click a request to animepahe.pw, and copy the "cookie" request header value here.
+// (Also copy your browser's "user-agent" value into UA above.) These cookies expire.
+// Keep this value private - do not share it.
+var USER_COOKIE = "";
+
 var cookieCache = null;
 
 function log(msg) {
@@ -23,6 +29,9 @@ function log(msg) {
 }
 
 function getCookie() {
+    if (USER_COOKIE) {
+        return Promise.resolve(USER_COOKIE);
+    }
     if (cookieCache) {
         return Promise.resolve(cookieCache);
     }
@@ -33,6 +42,7 @@ function getCookie() {
                 sc = res.headers.get("set-cookie") || "";
             } catch (e) {}
             var m = sc.match(/__ddg2_=[^;]*/);
+            log("check.js status " + res.status + ", ddg2 cookie " + (m ? "found" : "NOT found"));
             cookieCache = m ? ("__ddg1_=; " + m[0] + ";") : FALLBACK_COOKIE;
             return cookieCache;
         })
@@ -45,6 +55,7 @@ function getCookie() {
 // Animepahe requests (need the DDoS-Guard cookie).
 function paheText(url, referer) {
     log("GET " + url);
+    var status = 0;
     return getCookie().then(function (cookie) {
         return fetch(url, {
             headers: {
@@ -54,12 +65,14 @@ function paheText(url, referer) {
             }
         });
     }).then(function (res) {
-        log("status " + res.status + " for " + url);
+        status = res.status;
+        log("status " + status + " for " + url);
         return res.text();
     }).then(function (text) {
         log("body length " + text.length);
-        if (/ddos-guard/i.test(text) && /<title>\s*DDoS-Guard/i.test(text)) {
-            throw new Error("Animepahe returned a DDoS-Guard challenge. Paste a browser Cookie into FALLBACK_COOKIE.");
+        if (status !== 200) {
+            log("non-200 body start: " + text.replace(/\s+/g, " ").substring(0, 500));
+            throw new Error("Animepahe answered HTTP " + status + " (bot protection?)");
         }
         return text;
     });

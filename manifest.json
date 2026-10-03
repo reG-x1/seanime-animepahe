@@ -2,7 +2,7 @@
   "id": "animepahe-custom",
   "name": "Animepahe (Custom)",
   "description": "Animepahe streaming provider (direct scraper)",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "type": "onlinestream-provider",
   "language": "javascript",
   "lang": "en",

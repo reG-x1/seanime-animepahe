@@ -6,7 +6,7 @@
 
 // Animepahe changes domains often (animepahe.ru / .com / .si / .ch ...).
 // Open the one that currently loads in your browser and put it here.
-var BASE = "https://animepahe.ru";
+var BASE = "https://animepahe.pw";
 
 var UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
 

@@ -16,6 +16,12 @@ var FALLBACK_COOKIE = "__ddg1_=; __ddg2_=;";
 
 var cookieCache = null;
 
+function log(msg) {
+    try {
+        console.log("[pahe] " + msg);
+    } catch (e) {}
+}
+
 function getCookie() {
     if (cookieCache) {
         return Promise.resolve(cookieCache);
@@ -38,6 +44,7 @@ function getCookie() {
 
 // Animepahe requests (need the DDoS-Guard cookie).
 function paheText(url, referer) {
+    log("GET " + url);
     return getCookie().then(function (cookie) {
         return fetch(url, {
             headers: {
@@ -47,8 +54,10 @@ function paheText(url, referer) {
             }
         });
     }).then(function (res) {
+        log("status " + res.status + " for " + url);
         return res.text();
     }).then(function (text) {
+        log("body length " + text.length);
         if (/ddos-guard/i.test(text) && /<title>\s*DDoS-Guard/i.test(text)) {
             throw new Error("Animepahe returned a DDoS-Guard challenge. Paste a browser Cookie into FALLBACK_COOKIE.");
         }
@@ -58,13 +67,18 @@ function paheText(url, referer) {
 
 // Kwik requests (only need a Referer).
 function kwikText(url) {
+    log("GET kwik " + url);
     return fetch(url, {
         headers: {
             "Referer": BASE + "/",
             "User-Agent": UA
         }
     }).then(function (res) {
+        log("kwik status " + res.status);
         return res.text();
+    }).then(function (text) {
+        log("kwik body length " + text.length);
+        return text;
     });
 }
 
@@ -105,13 +119,20 @@ function resolveKwik(kwikUrl) {
     return kwikText(kwikUrl).then(function (html) {
         var m = html.match(/\}\('([\s\S]*?)',\s*(\d+),\s*(\d+),\s*'([^']*)'\.split\('\|'\)/);
         if (!m) {
+            log("kwik: packed script NOT found. Start of page: " + html.substring(0, 300));
             return null;
         }
         var payload = m[1].replace(/\\'/g, "'");
         var unpacked = unpack(payload, parseInt(m[2], 10), parseInt(m[3], 10), m[4].split("|"));
         var u = unpacked.match(/https?:\/\/[^'"\s\\]+\.m3u8[^'"\s\\]*/);
-        return u ? u[0] : null;
-    }).catch(function () {
+        if (!u) {
+            log("kwik: unpacked but no m3u8 found. Unpacked start: " + unpacked.substring(0, 300));
+            return null;
+        }
+        log("kwik: m3u8 found " + u[0]);
+        return u[0];
+    }).catch(function (err) {
+        log("kwik error: " + err);
         return null;
     });
 }
@@ -175,8 +196,28 @@ function fetchEpisodePages(animeId, page, acc) {
     });
 }
 
+function resolveSequential(found, idx, acc) {
+    if (idx >= found.length) {
+        return Promise.resolve(acc);
+    }
+    var f = found[idx];
+    return resolveKwik(f.kwik).then(function (m3u8) {
+        if (m3u8) {
+            acc.push({
+                server: "kwik",
+                url: m3u8,
+                quality: f.resolution ? (f.resolution + "p") : "auto",
+                isM3U8: true,
+                referer: originOf(f.kwik) + "/"
+            });
+        }
+        return resolveSequential(found, idx + 1, acc);
+    });
+}
+
 // Returns [{ server, url, quality, isM3U8, referer }]
 function resolveEpisode(episodeId) {
+    log("resolveEpisode " + episodeId);
     return paheText(BASE + "/play/" + episodeId).then(function (html) {
         var re = /<button[^>]*data-src="([^"]+)"[^>]*>/g;
         var m;
@@ -191,38 +232,14 @@ function resolveEpisode(episodeId) {
                 resolution: parseInt(attr(m[0], "data-resolution"), 10) || 0
             });
         }
+        log("found " + found.length + " kwik buttons");
+        if (found.length === 0) {
+            log("no buttons. Start of play page: " + html.substring(0, 300));
+        }
         found.sort(function (x, y) {
             return y.resolution - x.resolution;
         });
-
-        var jobs = [];
-        for (var i = 0; i < found.length; i++) {
-            jobs.push(
-                (function (f) {
-                    return resolveKwik(f.kwik).then(function (m3u8) {
-                        if (!m3u8) {
-                            return null;
-                        }
-                        return {
-                            server: "kwik",
-                            url: m3u8,
-                            quality: f.resolution ? (f.resolution + "p") : "auto",
-                            isM3U8: true,
-                            referer: originOf(f.kwik) + "/"
-                        };
-                    });
-                })(found[i])
-            );
-        }
-        return Promise.all(jobs);
-    }).then(function (results) {
-        var out = [];
-        for (var i = 0; i < results.length; i++) {
-            if (results[i]) {
-                out.push(results[i]);
-            }
-        }
-        return out;
+        return resolveSequential(found, 0, []);
     });
 }
 
@@ -241,6 +258,7 @@ Provider.prototype.getSettings = function () {
 
 // opts = { query, dub, media: { englishTitle, romajiTitle, synonyms, ... } }
 Provider.prototype.search = function (opts) {
+    log("search " + JSON.stringify(opts));
     var queries = [];
     if (typeof opts === "string") {
         queries.push(opts);
@@ -261,6 +279,7 @@ Provider.prototype.search = function (opts) {
 };
 
 Provider.prototype.findEpisodes = function (id) {
+    log("findEpisodes " + id);
     return fetchEpisodePages(id, 1, []);
 };
 
@@ -282,6 +301,7 @@ Provider.prototype.findVideoSources = function (episodeId) {
 
 // Entry point Seanime calls for playback.
 Provider.prototype.findEpisodeServer = function (episode, server) {
+    log("findEpisodeServer id=" + episode.id + " server=" + server);
     return resolveEpisode(episode.id).then(function (sources) {
         if (sources.length === 0) {
             throw new Error("No playable sources found for this episode");

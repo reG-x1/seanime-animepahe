@@ -1,0 +1,12 @@
+{
+  "id": "animepahe-custom",
+  "name": "Animepahe (Custom)",
+  "description": "Animepahe streaming provider (direct scraper)",
+  "version": "1.0.0",
+  "type": "onlinestream-provider",
+  "language": "javascript",
+  "lang": "en",
+  "author": "Naveen",
+  "manifestURI": "https://raw.githubusercontent.com/YOUR_USERNAME/seanime-animepahe/main/manifest.json",
+  "payloadURI": "https://raw.githubusercontent.com/YOUR_USERNAME/seanime-animepahe/main/provider.js"
+}

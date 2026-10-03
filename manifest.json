@@ -7,6 +7,6 @@
   "language": "javascript",
   "lang": "en",
   "author": "Naveen",
-  "manifestURI": "https://raw.githubusercontent.com/YOUR_USERNAME/seanime-animepahe/main/manifest.json",
-  "payloadURI": "https://raw.githubusercontent.com/YOUR_USERNAME/seanime-animepahe/main/provider.js"
+  "manifestURI": "https://raw.githubusercontent.com/reG-x1/seanime-animepahe/main/manifest.json",
+  "payloadURI": "https://raw.githubusercontent.com/reG-x1/seanime-animepahe/main/provider.js"
 }

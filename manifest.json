@@ -1,6 +1,6 @@
 {
-  "id": "animepahe-custom",
-  "name": "Animepahe (Custom)",
+  "id": "animepahe",
+  "name": "Animepahe",
   "description": "Animepahe streaming provider (direct scraper)",
   "version": "1.0.3",
   "type": "onlinestream-provider",

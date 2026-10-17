@@ -13,7 +13,11 @@ class Provider {
   // ───────────────────────── search ─────────────────────────
 
   async search(opts) {
-    console.log(`[Animepahe] v2.1.1 search: "${opts.query}" dub=${!!opts.dub}`);
+    try { return await this._search(opts); } finally { await this.closeBrowser(); }
+  }
+
+  async _search(opts) {
+    console.log(`[Animepahe] v2.2.0 search: "${opts.query}" dub=${!!opts.dub}`);
     const audio = opts.dub ? "dub" : "sub";
     const queries = this.uniq([
       opts.media && opts.media.romajiTitle,
@@ -56,6 +60,10 @@ class Provider {
   // ───────────────────────── episodes ─────────────────────────
 
   async findEpisodes(id) {
+    try { return await this._findEpisodes(id); } finally { await this.closeBrowser(); }
+  }
+
+  async _findEpisodes(id) {
     console.log(`[Animepahe] findEpisodes: ${id}`);
     const parts = String(id).split("|");
     const animeSession = parts[0];
@@ -89,13 +97,17 @@ class Provider {
   // ───────────────────────── video ─────────────────────────
 
   async findEpisodeServer(episode, _server) {
+    try { return await this._findEpisodeServer(episode, _server); } finally { await this.closeBrowser(); }
+  }
+
+  async _findEpisodeServer(episode, _server) {
     console.log(`[Animepahe] findEpisodeServer: ${episode && episode.id}`);
     const idStr = String(episode.id);
     const wantDub = idStr.split("|")[1] === "dub";
     const path = idStr.split("|")[0]; // animeSession/episodeSession
     if (path.indexOf("/") === -1) throw new Error("Animepahe: invalid episode id");
 
-    const page = await this.get(`/play/${path}`);
+    const page = await this.get(`/play/${path}`, undefined, true);
     const buttons = this.parsePlayButtons(page.body).filter(b =>
       wantDub ? b.audio === "eng" : b.audio !== "eng"
     );
@@ -198,35 +210,92 @@ class Provider {
   }
 
   // GET against the first reachable mirror; solves a Cloudflare/DDoS-Guard challenge once if needed.
-  async get(path, extraHeaders) {
+  // Last resort: perform the request inside the real browser (immune to TLS/UA fingerprint checks).
+  async get(path, extraHeaders, asHtml) {
+    const mode = $store.get("animepahe:browsermode");
+    if (mode && Date.now() - mode.at < 1800000) {
+      try {
+        return await this.browserGet(this.bases()[0], path, asHtml);
+      } catch (e) {
+        console.log(`[Animepahe] browser mode failed, trying plain fetch: ${this.why(e)}`);
+      }
+    }
     let lastErr;
     for (const base of this.bases()) {
       try {
         let r = await this.fetchOnce(base, path, extraHeaders);
         if (this.isBlocked(r)) {
-          console.log(`[Animepahe] ${base} returned an anti-bot challenge (HTTP ${r.status}); trying browser solve`);
+          console.log(`[Animepahe] ${base} returned an anti-bot challenge (HTTP ${r.status}); trying solve`);
           const solved = await this.solveChallenge(base);
           if (!solved) {
-            throw new Error(
-              "Animepahe is behind an anti-bot challenge. Options: install Chrome/Chromium so Seanime\'s ChromeDP can solve it, run FlareSolverr and set solverUrl, or paste your browser cookie + User-Agent into the extension settings."
+            throw this.fatal(
+              "Animepahe is behind an anti-bot challenge. Options: install Chrome/Chromium so Seanime's ChromeDP can solve it, run FlareSolverr and set solverUrl, or paste your browser cookie + User-Agent into the extension settings."
             );
           }
           const sess = this.loadSession();
           r = await this.fetchOnce((sess && sess.origin) || base, path, extraHeaders);
-          if (this.isBlocked(r)) throw new Error(`Animepahe still blocked after solving (HTTP ${r.status}); cookie is probably bound to a different IP/User-Agent`);
+          if (this.isBlocked(r)) {
+            console.log("[Animepahe] plain fetch is still blocked with the solved cookie; switching to in-browser requests");
+            $store.set("animepahe:browsermode", { at: Date.now() });
+            return await this.browserGet((sess && sess.origin) || base, path, asHtml);
+          }
         }
-        if (!r.ok) throw new Error(`Animepahe HTTP ${r.status} for ${path}`);
+        if (!r.ok) throw this.fatal(`Animepahe HTTP ${r.status} for ${path}`);
         this.setBase(r.base);
         return r;
       } catch (e) {
         lastErr = e;
-        const msg = this.why(e);
-        // Only fall through to the next mirror on transport errors.
-        if (/anti-bot|still blocked|HTTP \d+/.test(msg)) throw e;
-        console.log(`[Animepahe] ${base} unreachable: ${msg}`);
+        if (e && e.fatal) throw e;
+        console.log(`[Animepahe] ${base} unreachable: ${this.why(e)}`);
       }
     }
     throw lastErr || new Error("Animepahe: no mirror reachable");
+  }
+
+  fatal(msg) { const e = new Error(msg); e.fatal = true; return e; }
+
+  // Runs the request in the already-cleared browser tab and reads the rendered body back.
+  async browserGet(base, path, asHtml) {
+    const br = await this.ensureBrowser(base);
+    if (!br) throw this.fatal("Animepahe: could not start/clear the ChromeDP browser (is Chrome/Chromium installed?)");
+    const origin = this._brOrigin || base;
+    console.log(`[Animepahe] BROWSER GET ${origin}${path}`);
+    try {
+      await br.navigate(`${origin}${path}`);
+    } catch (e) {
+      console.log(`[Animepahe] navigate: ${this.why(e)} (continuing)`);
+    }
+    const expr = asHtml ? "document.documentElement.outerHTML" : "(document.body && document.body.innerText) || ''";
+    let body = "";
+    for (let i = 0; i < 20; i++) {
+      await br.sleep(i ? 1000 : 300);
+      body = await this.evalBrowser(br, expr);
+      if (body && !this.isBlocked({ ok: false, status: 403, body })) break;
+    }
+    console.log(`[Animepahe]   -> browser body ${body.length} bytes, starts: ${body.slice(0, 80).replace(/\s+/g, " ")}`);
+    if (!body || this.isBlocked({ ok: false, status: 403, body })) throw this.fatal("Animepahe: page still blocked inside the browser");
+    this.setBase(origin);
+    return { ok: true, status: 200, body, base: origin };
+  }
+
+  async evalBrowser(br, expression) {
+    try {
+      const r = await br.executeCDP("Runtime.evaluate", { expression, returnByValue: true });
+      const v = r && r.result && r.result.value;
+      if (typeof v === "string") return v;
+      console.log(`[Animepahe] Runtime.evaluate returned unexpected shape: ${JSON.stringify(r).slice(0, 200)}`);
+    } catch (e) {
+      console.log(`[Animepahe] Runtime.evaluate failed: ${this.why(e)}`);
+    }
+    return "";
+  }
+
+  async closeBrowser() {
+    const br = this._br;
+    this._br = null;
+    if (br) {
+      try { await br.close(); } catch (_e) {}
+    }
   }
 
   async fetchOnce(base, path, extraHeaders) {
@@ -310,17 +379,22 @@ class Provider {
     }
   }
 
-  // Real Chrome through Seanime's ChromeDP. Detects where the site redirected to (.com -> .pw).
   async solveWithBrowser(base) {
+    return !!(await this.ensureBrowser(base));
+  }
+
+  // Real Chrome through Seanime's ChromeDP. Kept open (this._br) until the public call finishes.
+  async ensureBrowser(base) {
+    if (this._br) return this._br;
     if (typeof ChromeDP === "undefined" || typeof ChromeDP.newBrowser !== "function") {
       console.log("[Animepahe] ChromeDP is unavailable");
-      return false;
+      return null;
     }
     const ua = this.userAgent();
     const hosts = this.bases().map(b => this.hostOf(b));
     let browser;
     try {
-      browser = await ChromeDP.newBrowser({ timeout: 60, userAgent: ua });
+      browser = await ChromeDP.newBrowser({ timeout: 90, userAgent: ua });
       try {
         await browser.navigate(`${base}/`);
       } catch (e) {
@@ -335,26 +409,24 @@ class Provider {
         if (!cleared) continue;
         const dom = String(cleared.domain).replace(/^\./, "");
         let origin = `https://${dom}`;
-        try {
-          const loc = await browser.executeCDP("Runtime.evaluate", { expression: "location.origin", returnByValue: true });
-          const v = loc && loc.result && loc.result.value;
-          if (typeof v === "string" && /^https?:\/\//.test(v) && hosts.some(h => this.cookieMatches({ domain: this.hostOf(v) }, h))) origin = v;
-        } catch (_e) {}
+        const v = await this.evalBrowser(browser, "location.origin");
+        if (/^https?:\/\//.test(v) && hosts.some(h => this.cookieMatches({ domain: this.hostOf(v) }, h))) origin = v;
         const host = this.hostOf(origin);
         const jar = mine.filter(c => this.cookieMatches(c, host));
+        console.log(`[Animepahe] cookies: ${jar.map(c => c.name).join(", ")}; UA sent: ${ua.slice(0, 40)}...`);
         this.saveSession(jar.map(c => `${c.name}=${c.value}`).join("; "), ua, origin, `browser (~${i + 1}s)`);
-        return true;
+        this._br = browser;
+        this._brOrigin = origin;
+        return browser;
       }
       console.log("[Animepahe] challenge cookie never appeared");
-      return false;
     } catch (e) {
       console.log(`[Animepahe] browser solve failed: ${this.why(e)}`);
-      return false;
-    } finally {
-      if (browser) {
-        try { await browser.close(); } catch (_e) {}
-      }
     }
+    if (browser) {
+      try { await browser.close(); } catch (_e) {}
+    }
+    return null;
   }
 
   loadSession() {

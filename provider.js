@@ -17,7 +17,7 @@ class Provider {
   }
 
   async _search(opts) {
-    console.log(`[Animepahe] v2.2.0 search: "${opts.query}" dub=${!!opts.dub}`);
+    console.log(`[Animepahe] v2.3.0 search: "${opts.query}" dub=${!!opts.dub}`);
     const audio = opts.dub ? "dub" : "sub";
     const queries = this.uniq([
       opts.media && opts.media.romajiTitle,
@@ -254,28 +254,59 @@ class Provider {
 
   fatal(msg) { const e = new Error(msg); e.fatal = true; return e; }
 
-  // Runs the request in the already-cleared browser tab and reads the rendered body back.
+  // Runs the request in the already-cleared browser tab and reads the body back.
+  // Preferred: a same-origin fetch() from inside the page (how the site's own JS calls its API),
+  // which avoids a fresh navigation challenge. Fallback: navigate and wait for the challenge to pass.
   async browserGet(base, path, asHtml) {
     const br = await this.ensureBrowser(base);
     if (!br) throw this.fatal("Animepahe: could not start/clear the ChromeDP browser (is Chrome/Chromium installed?)");
     const origin = this._brOrigin || base;
     console.log(`[Animepahe] BROWSER GET ${origin}${path}`);
-    try {
-      await br.navigate(`${origin}${path}`);
-    } catch (e) {
-      console.log(`[Animepahe] navigate: ${this.why(e)} (continuing)`);
-    }
-    const expr = asHtml ? "document.documentElement.outerHTML" : "(document.body && document.body.innerText) || ''";
-    let body = "";
-    for (let i = 0; i < 20; i++) {
-      await br.sleep(i ? 1000 : 300);
-      body = await this.evalBrowser(br, expr);
-      if (body && !this.isBlocked({ ok: false, status: 403, body })) break;
+
+    await br.sleep(500);
+    let body = await this.pageFetch(br, path);
+
+    if (!body) {
+      console.log("[Animepahe] in-page fetch gave nothing usable; navigating instead");
+      try {
+        await br.navigate(`${origin}${path}`);
+      } catch (e) {
+        console.log(`[Animepahe] navigate: ${this.why(e)} (continuing)`);
+      }
+      const expr = asHtml ? "document.documentElement.outerHTML" : "(document.body && document.body.innerText) || ''";
+      for (let i = 0; i < 30; i++) {
+        await br.sleep(1000);
+        body = await this.evalBrowser(br, expr);
+        if (body && !this.isBlocked({ ok: false, status: 403, body })) break;
+        if (i === 0 || i === 10 || i === 29) console.log(`[Animepahe]   still waiting (${i + 1}s): ${String(body).slice(0, 100).replace(/\s+/g, " ")}`);
+        body = "";
+      }
     }
     console.log(`[Animepahe]   -> browser body ${body.length} bytes, starts: ${body.slice(0, 80).replace(/\s+/g, " ")}`);
-    if (!body || this.isBlocked({ ok: false, status: 403, body })) throw this.fatal("Animepahe: page still blocked inside the browser");
+    if (!body) throw this.fatal("Animepahe: page still blocked inside the browser (security verification never finished)");
     this.setBase(origin);
     return { ok: true, status: 200, body, base: origin };
+  }
+
+  async pageFetch(br, path) {
+    const expr =
+      `fetch(${JSON.stringify(path)},{credentials:"include",headers:{"X-Requested-With":"XMLHttpRequest"}})` +
+      `.then(function(r){return r.text().then(function(t){return JSON.stringify({s:r.status,b:t})})})` +
+      `.catch(function(e){return JSON.stringify({s:0,b:String(e)})})`;
+    try {
+      const r = await br.executeCDP("Runtime.evaluate", { expression: expr, awaitPromise: true, returnByValue: true });
+      const v = r && r.result && r.result.value;
+      if (typeof v !== "string") {
+        console.log(`[Animepahe] in-page fetch: unexpected result shape: ${JSON.stringify(r).slice(0, 200)}`);
+        return "";
+      }
+      const o = JSON.parse(v);
+      console.log(`[Animepahe]   in-page fetch -> HTTP ${o.s}, ${String(o.b).length} bytes, starts: ${String(o.b).slice(0, 80).replace(/\s+/g, " ")}`);
+      if (o.s === 200 && o.b && !this.isBlocked({ ok: false, status: 403, body: o.b })) return o.b;
+    } catch (e) {
+      console.log(`[Animepahe] in-page fetch failed: ${this.why(e)}`);
+    }
+    return "";
   }
 
   async evalBrowser(br, expression) {
@@ -323,6 +354,11 @@ class Provider {
       b.indexOf("/cdn-cgi/challenge-platform") !== -1 ||
       b.indexOf("cf-browser-verification") !== -1 ||
       b.indexOf("attention required! | cloudflare") !== -1 ||
+      b.indexOf("performing security verification") !== -1 ||
+      b.indexOf("protect against malicious bots") !== -1 ||
+      b.indexOf("verifies you are not a bot") !== -1 ||
+      b.indexOf("verify you are human") !== -1 ||
+      b.indexOf("checking your browser") !== -1 ||
       b.indexOf("ddos-guard") !== -1 ||
       b.indexOf("__ddg") !== -1 && !r.ok
     );

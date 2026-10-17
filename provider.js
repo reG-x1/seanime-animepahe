@@ -13,6 +13,7 @@ class Provider {
   // ───────────────────────── search ─────────────────────────
 
   async search(opts) {
+    console.log(`[Animepahe] v2.1.1 search: "${opts.query}" dub=${!!opts.dub}`);
     const audio = opts.dub ? "dub" : "sub";
     const queries = this.uniq([
       opts.media && opts.media.romajiTitle,
@@ -55,6 +56,7 @@ class Provider {
   // ───────────────────────── episodes ─────────────────────────
 
   async findEpisodes(id) {
+    console.log(`[Animepahe] findEpisodes: ${id}`);
     const parts = String(id).split("|");
     const animeSession = parts[0];
     const audio = parts[1] === "dub" ? "dub" : "sub";
@@ -87,6 +89,7 @@ class Provider {
   // ───────────────────────── video ─────────────────────────
 
   async findEpisodeServer(episode, _server) {
+    console.log(`[Animepahe] findEpisodeServer: ${episode && episode.id}`);
     const idStr = String(episode.id);
     const wantDub = idStr.split("|")[1] === "dub";
     const path = idStr.split("|")[0]; // animeSession/episodeSession
@@ -234,8 +237,12 @@ class Provider {
     );
     const cookie = (sess && sess.cookie && sess.origin === base ? sess.cookie : "") || this.pref("cookie", "");
     if (cookie) headers.Cookie = cookie;
-    const res = await fetch(`${base}${path}`, { headers, timeout: 30 });
-    return { ok: res.ok, status: res.status, body: res.text() || "", base };
+    const t0 = Date.now();
+    console.log(`[Animepahe] GET ${base}${path} (cookie: ${cookie ? "yes" : "no"})`);
+    const res = await fetch(`${base}${path}`, { headers, timeout: 20 });
+    const body = res.text() || "";
+    console.log(`[Animepahe]   -> HTTP ${res.status}, ${body.length} bytes, ${Date.now() - t0}ms, starts: ${body.slice(0, 80).replace(/\s+/g, " ")}`);
+    return { ok: res.ok, status: res.status, body, base };
   }
 
   isBlocked(r) {

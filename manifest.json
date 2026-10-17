@@ -2,7 +2,7 @@
   "id": "animepahe",
   "name": "Animepahe",
   "description": "Animepahe streaming provider (direct scraper, Kwik HLS, sub + dub, Cloudflare handling)",
-  "version": "2.3.0",
+  "version": "2.4.0",
   "type": "onlinestream-provider",
   "language": "javascript",
   "lang": "en",

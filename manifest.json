@@ -1,12 +1,22 @@
 {
   "id": "animepahe",
   "name": "Animepahe",
-  "description": "Animepahe streaming provider (direct scraper)",
-  "version": "1.0.3",
+  "description": "Animepahe streaming provider (direct scraper, Kwik HLS, sub + dub, Cloudflare handling)",
+  "version": "2.1.0",
   "type": "onlinestream-provider",
   "language": "javascript",
   "lang": "en",
   "author": "Naveen",
   "manifestURI": "https://raw.githubusercontent.com/reG-x1/seanime-animepahe/main/manifest.json",
-  "payloadURI": "https://raw.githubusercontent.com/reG-x1/seanime-animepahe/main/provider.js"
+  "payloadURI": "https://raw.githubusercontent.com/reG-x1/seanime-animepahe/main/provider.js",
+  "userConfig": {
+    "version": 1,
+    "requiresConfig": false,
+    "fields": [
+      { "type": "text", "name": "baseUrl", "label": "Base URL", "default": "https://animepahe.com" },
+      { "type": "text", "name": "cookie", "label": "Cookie (optional, cf_clearance etc.)", "default": "" },
+      { "type": "text", "name": "solverUrl", "label": "FlareSolverr URL (optional, e.g. http://127.0.0.1:8191/v1)", "default": "" },
+      { "type": "text", "name": "userAgent", "label": "User-Agent (must match the browser the cookie came from)", "default": "" }
+    ]
+  }
 }

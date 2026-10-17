@@ -1,337 +1,383 @@
-/// <reference path="./onlinestream-provider.d.ts" />
+/// <reference path="./online-streaming-provider.d.ts" />
+class Provider {
+  constructor() {
+    this.mirrors = ["https://animepahe.com", "https://animepahe.pw", "https://animepahe.org"];
+    this.defaultUA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36";
+    this.sessionKey = "animepahe:clearance";
+  }
 
-// ---------------------------------------------------------------
-// Animepahe (Custom) - direct scraper, ES5 only (Goja compatible)
-// ---------------------------------------------------------------
+  getSettings() {
+    return { episodeServers: ["Kwik"], supportsDub: true };
+  }
 
-// Animepahe changes domains often (animepahe.ru / .com / .si / .ch ...).
-// Open the one that currently loads in your browser and put it here.
-var BASE = "https://animepahe.pw";
+  // ───────────────────────── search ─────────────────────────
 
-var UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
+  async search(opts) {
+    const audio = opts.dub ? "dub" : "sub";
+    const queries = this.uniq([
+      opts.media && opts.media.romajiTitle,
+      opts.media && opts.media.englishTitle,
+      opts.query,
+    ].map(q => (q || "").trim()).filter(Boolean));
 
-// Fallback cookie for DDoS-Guard. If the site shows a challenge page, copy the
-// full Cookie header from your browser's dev tools (Network tab) and paste it here.
-var FALLBACK_COOKIE = "__ddg1_=; __ddg2_=;";
-
-// If Animepahe keeps answering 403, open it in your browser, press F12 -> Network,
-// reload, click a request to animepahe.pw, and copy the "cookie" request header value here.
-// (Also copy your browser's "user-agent" value into UA above.) These cookies expire.
-// Keep this value private - do not share it.
-var USER_COOKIE = "";
-
-var cookieCache = null;
-
-function log(msg) {
-    try {
-        console.log("[pahe] " + msg);
-    } catch (e) {}
-}
-
-function getCookie() {
-    if (USER_COOKIE) {
-        return Promise.resolve(USER_COOKIE);
-    }
-    if (cookieCache) {
-        return Promise.resolve(cookieCache);
-    }
-    return fetch("https://check.ddos-guard.net/check.js")
-        .then(function (res) {
-            var sc = "";
-            try {
-                sc = res.headers.get("set-cookie") || "";
-            } catch (e) {}
-            var m = sc.match(/__ddg2_=[^;]*/);
-            log("check.js status " + res.status + ", ddg2 cookie " + (m ? "found" : "NOT found"));
-            cookieCache = m ? ("__ddg1_=; " + m[0] + ";") : FALLBACK_COOKIE;
-            return cookieCache;
-        })
-        .catch(function () {
-            cookieCache = FALLBACK_COOKIE;
-            return cookieCache;
+    const seen = {};
+    const results = [];
+    for (const q of queries) {
+      let data;
+      try {
+        data = await this.api(`/api?m=search&q=${encodeURIComponent(q)}`);
+      } catch (e) {
+        if (!results.length && q === queries[queries.length - 1]) throw e;
+        console.log(`[Animepahe] search "${q}" failed: ${this.why(e)}`);
+        continue;
+      }
+      const list = (data && data.data) || [];
+      for (const item of list) {
+        if (!item || !item.session || seen[item.session]) continue;
+        seen[item.session] = true;
+        results.push({
+          id: `${item.session}|${audio}`,
+          title: item.title || item.session,
+          url: `${this.currentBase()}/anime/${item.session}`,
+          subOrDub: "both",
+          _eps: Number(item.episodes) || 0,
         });
-}
+      }
+      if (results.length) break; // first query that hits is the most specific
+    }
 
-// Animepahe requests (need the DDoS-Guard cookie).
-function paheText(url, referer) {
-    log("GET " + url);
-    var status = 0;
-    return getCookie().then(function (cookie) {
-        return fetch(url, {
-            headers: {
-                "Cookie": cookie,
-                "Referer": referer || (BASE + "/"),
-                "User-Agent": UA
-            }
+    const want = opts.media && opts.media.episodeCount > 0 ? opts.media.episodeCount : 0;
+    if (want) results.sort((a, b) => (b._eps === want ? 1 : 0) - (a._eps === want ? 1 : 0));
+    if (!results.length) throw new Error("Animepahe: no results found");
+    return results.map(r => ({ id: r.id, title: r.title, url: r.url, subOrDub: r.subOrDub }));
+  }
+
+  // ───────────────────────── episodes ─────────────────────────
+
+  async findEpisodes(id) {
+    const parts = String(id).split("|");
+    const animeSession = parts[0];
+    const audio = parts[1] === "dub" ? "dub" : "sub";
+    if (!animeSession) return [];
+
+    const first = await this.api(`/api?m=release&id=${animeSession}&sort=episode_asc&page=1`);
+    let items = (first && first.data) || [];
+    const last = Math.min(Number(first && first.last_page) || 1, 60);
+    for (let page = 2; page <= last; page++) {
+      const next = await this.api(`/api?m=release&id=${animeSession}&sort=episode_asc&page=${page}`);
+      items = items.concat((next && next.data) || []);
+    }
+
+    const base = this.currentBase();
+    const episodes = [];
+    for (const ep of items) {
+      const number = Number.parseFloat(ep && ep.episode);
+      if (!ep || !ep.session || !Number.isFinite(number)) continue;
+      episodes.push({
+        id: `${animeSession}/${ep.session}|${audio}`,
+        number,
+        title: ep.title ? `Episode ${number} - ${ep.title}` : `Episode ${number}`,
+        url: `${base}/play/${animeSession}/${ep.session}`,
+      });
+    }
+    episodes.sort((a, b) => a.number - b.number);
+    return episodes;
+  }
+
+  // ───────────────────────── video ─────────────────────────
+
+  async findEpisodeServer(episode, _server) {
+    const idStr = String(episode.id);
+    const wantDub = idStr.split("|")[1] === "dub";
+    const path = idStr.split("|")[0]; // animeSession/episodeSession
+    if (path.indexOf("/") === -1) throw new Error("Animepahe: invalid episode id");
+
+    const page = await this.get(`/play/${path}`);
+    const buttons = this.parsePlayButtons(page.body).filter(b =>
+      wantDub ? b.audio === "eng" : b.audio !== "eng"
+    );
+    if (!buttons.length) {
+      throw new Error(wantDub ? "Animepahe: no dub available for this episode" : "Animepahe: no stream buttons found on play page");
+    }
+
+    // One button per resolution (first fansub wins), highest first.
+    const byRes = {};
+    for (const b of buttons) if (!byRes[b.res]) byRes[b.res] = b;
+    const picked = Object.keys(byRes).map(Number).sort((a, b) => b - a).map(r => byRes[r]);
+
+    const videoSources = [];
+    let lastErr = "";
+    for (const b of picked) {
+      try {
+        const url = await this.resolveKwik(b.src, page.base);
+        videoSources.push({
+          url,
+          type: "m3u8",
+          quality: `${b.res}p`,
+          label: b.fansub ? `${b.res}p · ${b.fansub}` : `${b.res}p`,
+          subtitles: [],
         });
-    }).then(function (res) {
-        status = res.status;
-        log("status " + status + " for " + url);
-        return res.text();
-    }).then(function (text) {
-        log("body length " + text.length);
-        if (status !== 200) {
-            log("non-200 body start: " + text.replace(/\s+/g, " ").substring(0, 500));
-            throw new Error("Animepahe answered HTTP " + status + " (bot protection?)");
-        }
-        return text;
-    });
-}
-
-// Kwik requests (only need a Referer).
-function kwikText(url) {
-    log("GET kwik " + url);
-    return fetch(url, {
-        headers: {
-            "Referer": BASE + "/",
-            "User-Agent": UA
-        }
-    }).then(function (res) {
-        log("kwik status " + res.status);
-        return res.text();
-    }).then(function (text) {
-        log("kwik body length " + text.length);
-        return text;
-    });
-}
-
-function safeParse(text) {
-    try {
-        return JSON.parse(text);
-    } catch (e) {
-        return null;
+        this._kwikOrigin = this.origin(b.src);
+      } catch (e) {
+        lastErr = this.why(e);
+        console.log(`[Animepahe] ${b.res}p failed: ${lastErr}`);
+      }
     }
-}
+    if (!videoSources.length) throw new Error(`Animepahe: could not extract a stream (${lastErr})`);
 
-function attr(tag, name) {
-    var m = tag.match(new RegExp(name + '="([^"]*)"'));
-    return m ? m[1] : "";
-}
-
-function originOf(url) {
-    var m = url.match(/^(https?:\/\/[^\/]+)/);
-    return m ? m[1] : url;
-}
-
-// Dean Edwards p,a,c,k,e,d unpacker (what kwik uses to hide the m3u8 URL).
-function unpack(p, a, c, k) {
-    function e(n) {
-        return (n < a ? "" : e(parseInt(n / a, 10))) +
-            ((n = n % a) > 35 ? String.fromCharCode(n + 29) : n.toString(36));
-    }
-    var d = {};
-    while (c--) {
-        d[e(c)] = k[c] || e(c);
-    }
-    return p.replace(/\b\w+\b/g, function (w) {
-        return d.hasOwnProperty(w) ? d[w] : w;
-    });
-}
-
-function resolveKwik(kwikUrl) {
-    return kwikText(kwikUrl).then(function (html) {
-        var m = html.match(/\}\('([\s\S]*?)',\s*(\d+),\s*(\d+),\s*'([^']*)'\.split\('\|'\)/);
-        if (!m) {
-            log("kwik: packed script NOT found. Start of page: " + html.substring(0, 300));
-            return null;
-        }
-        var payload = m[1].replace(/\\'/g, "'");
-        var unpacked = unpack(payload, parseInt(m[2], 10), parseInt(m[3], 10), m[4].split("|"));
-        var u = unpacked.match(/https?:\/\/[^'"\s\\]+\.m3u8[^'"\s\\]*/);
-        if (!u) {
-            log("kwik: unpacked but no m3u8 found. Unpacked start: " + unpacked.substring(0, 300));
-            return null;
-        }
-        log("kwik: m3u8 found " + u[0]);
-        return u[0];
-    }).catch(function (err) {
-        log("kwik error: " + err);
-        return null;
-    });
-}
-
-// ---------------------------------------------------------------
-// Core lookups
-// ---------------------------------------------------------------
-
-function searchOnce(query) {
-    return paheText(BASE + "/api?m=search&q=" + encodeURIComponent(query)).then(function (text) {
-        var data = safeParse(text);
-        var list = (data && data.data) ? data.data : [];
-        var out = [];
-        for (var i = 0; i < list.length; i++) {
-            var r = list[i];
-            out.push({
-                id: String(r.session),
-                title: String(r.title),
-                image: r.poster || "",
-                url: BASE + "/anime/" + r.session,
-                subOrDub: "sub"
-            });
-        }
-        return out;
-    });
-}
-
-// Try each query in order until one returns results.
-function searchChain(queries, idx) {
-    if (idx >= queries.length) {
-        return Promise.resolve([]);
-    }
-    return searchOnce(queries[idx]).then(function (results) {
-        if (results.length > 0) {
-            return results;
-        }
-        return searchChain(queries, idx + 1);
-    });
-}
-
-function fetchEpisodePages(animeId, page, acc) {
-    var url = BASE + "/api?m=release&id=" + animeId + "&sort=episode_asc&page=" + page;
-    return paheText(url, BASE + "/anime/" + animeId).then(function (text) {
-        var data = safeParse(text);
-        if (!data || !data.data) {
-            return acc;
-        }
-        for (var i = 0; i < data.data.length; i++) {
-            var e = data.data[i];
-            acc.push({
-                id: animeId + "/" + e.session,
-                number: Number(e.episode),
-                title: (e.title && String(e.title).length > 0) ? String(e.title) : ("Episode " + e.episode),
-                url: BASE + "/play/" + animeId + "/" + e.session
-            });
-        }
-        if (Number(data.current_page) < Number(data.last_page)) {
-            return fetchEpisodePages(animeId, page + 1, acc);
-        }
-        return acc;
-    });
-}
-
-function resolveSequential(found, idx, acc) {
-    if (idx >= found.length) {
-        return Promise.resolve(acc);
-    }
-    var f = found[idx];
-    return resolveKwik(f.kwik).then(function (m3u8) {
-        if (m3u8) {
-            acc.push({
-                server: "kwik",
-                url: m3u8,
-                quality: f.resolution ? (f.resolution + "p") : "auto",
-                isM3U8: true,
-                referer: originOf(f.kwik) + "/"
-            });
-        }
-        return resolveSequential(found, idx + 1, acc);
-    });
-}
-
-// Returns [{ server, url, quality, isM3U8, referer }]
-function resolveEpisode(episodeId) {
-    log("resolveEpisode " + episodeId);
-    return paheText(BASE + "/play/" + episodeId).then(function (html) {
-        var re = /<button[^>]*data-src="([^"]+)"[^>]*>/g;
-        var m;
-        var found = [];
-        while ((m = re.exec(html)) !== null) {
-            var audio = attr(m[0], "data-audio");
-            if (audio === "eng") {
-                continue; // dub entries skipped (supportsDub is false)
-            }
-            found.push({
-                kwik: m[1],
-                resolution: parseInt(attr(m[0], "data-resolution"), 10) || 0
-            });
-        }
-        log("found " + found.length + " kwik buttons");
-        if (found.length === 0) {
-            log("no buttons. Start of play page: " + html.substring(0, 300));
-        }
-        found.sort(function (x, y) {
-            return y.resolution - x.resolution;
-        });
-        return resolveSequential(found, 0, []);
-    });
-}
-
-// ---------------------------------------------------------------
-// Seanime provider interface
-// ---------------------------------------------------------------
-
-function Provider() {}
-
-Provider.prototype.getSettings = function () {
     return {
-        episodeServers: ["kwik"],
-        supportsDub: false
+      server: "Kwik",
+      headers: { Referer: `${this._kwikOrigin || "https://kwik.si"}/` },
+      videoSources,
     };
-};
+  }
 
-// opts = { query, dub, media: { englishTitle, romajiTitle, synonyms, ... } }
-Provider.prototype.search = function (opts) {
-    log("search " + JSON.stringify(opts));
-    var queries = [];
-    if (typeof opts === "string") {
-        queries.push(opts);
-    } else {
-        if (opts.query) {
-            queries.push(opts.query);
-        }
-        if (opts.media) {
-            if (opts.media.romajiTitle) {
-                queries.push(opts.media.romajiTitle);
-            }
-            if (opts.media.englishTitle) {
-                queries.push(opts.media.englishTitle);
-            }
-        }
+  async resolveKwik(embedUrl, base) {
+    const res = await fetch(embedUrl, {
+      headers: { "User-Agent": this.userAgent(), Referer: `${base}/`, Accept: "text/html,*/*" },
+      timeout: 30,
+    });
+    const html = res.text();
+    if (!res.ok) throw new Error(`kwik HTTP ${res.status}`);
+    const js = this.unpackKwik(html);
+    const m = js.match(/(?:const|var|let)\s+source\s*=\s*['"]([^'"]+)['"]/) || js.match(/https?:\/\/[^'"\s\\]+\.m3u8[^'"\s\\]*/);
+    if (!m) throw new Error("m3u8 not found in kwik page");
+    return (m[1] || m[0]).replace(/\\\//g, "/");
+  }
+
+  // Dean Edwards p,a,c,k,e,d unpacker (what kwik uses).
+  unpackKwik(html) {
+    const m = html.match(/\}\('((?:[^'\\]|\\.)*)',\s*(\d+),\s*(\d+),\s*'((?:[^'\\]|\\.)*)'\.split\('\|'\)/);
+    if (!m) return html; // some builds ship the source unpacked
+    const unesc = s => s.replace(/\\(['\\])/g, "$1");
+    const payload = unesc(m[1]);
+    const radix = parseInt(m[2], 10);
+    let count = parseInt(m[3], 10);
+    const keys = unesc(m[4]).split("|");
+    const enc = n => (n < radix ? "" : enc(Math.floor(n / radix))) + ((n = n % radix) > 35 ? String.fromCharCode(n + 29) : n.toString(36));
+    const dict = {};
+    while (count--) dict[enc(count)] = keys[count] || enc(count);
+    return payload.replace(/\b\w+\b/g, w => (Object.prototype.hasOwnProperty.call(dict, w) ? dict[w] : w));
+  }
+
+  parsePlayButtons(html) {
+    const out = [];
+    const re = /<button\b[^>]*\bdata-src\s*=\s*["'][^"']+["'][^>]*>/gi;
+    let m;
+    while ((m = re.exec(html)) !== null) {
+      const tag = m[0];
+      const src = this.attr(tag, "data-src");
+      if (!src) continue;
+      out.push({
+        src,
+        res: parseInt(this.attr(tag, "data-resolution"), 10) || 0,
+        audio: (this.attr(tag, "data-audio") || "jpn").toLowerCase(),
+        fansub: this.attr(tag, "data-fansub") || "",
+      });
     }
-    return searchChain(queries, 0);
-};
+    return out;
+  }
 
-Provider.prototype.findEpisodes = function (id) {
-    log("findEpisodes " + id);
-    return fetchEpisodePages(id, 1, []);
-};
+  attr(tag, name) {
+    const m = tag.match(new RegExp("\\b" + name + "\\s*=\\s*[\"']([^\"']*)[\"']", "i"));
+    return m ? m[1].replace(/&amp;/gi, "&") : "";
+  }
 
-// Shape requested originally: [{ server, url, quality, isM3U8 }]
-Provider.prototype.findVideoSources = function (episodeId) {
-    return resolveEpisode(episodeId).then(function (sources) {
-        var out = [];
-        for (var i = 0; i < sources.length; i++) {
-            out.push({
-                server: sources[i].server,
-                url: sources[i].url,
-                quality: sources[i].quality,
-                isM3U8: sources[i].isM3U8
-            });
-        }
-        return out;
-    });
-};
+  // ───────────────────────── http + anti-bot ─────────────────────────
 
-// Entry point Seanime calls for playback.
-Provider.prototype.findEpisodeServer = function (episode, server) {
-    log("findEpisodeServer id=" + episode.id + " server=" + server);
-    return resolveEpisode(episode.id).then(function (sources) {
-        if (sources.length === 0) {
-            throw new Error("No playable sources found for this episode");
+  async api(path) {
+    const r = await this.get(path, { Accept: "application/json, text/plain, */*", "X-Requested-With": "XMLHttpRequest" });
+    try {
+      return JSON.parse(r.body);
+    } catch (_e) {
+      throw new Error(`Animepahe: unexpected non-JSON response (HTTP ${r.status}): ${r.body.slice(0, 120)}`);
+    }
+  }
+
+  // GET against the first reachable mirror; solves a Cloudflare/DDoS-Guard challenge once if needed.
+  async get(path, extraHeaders) {
+    let lastErr;
+    for (const base of this.bases()) {
+      try {
+        let r = await this.fetchOnce(base, path, extraHeaders);
+        if (this.isBlocked(r)) {
+          console.log(`[Animepahe] ${base} returned an anti-bot challenge (HTTP ${r.status}); trying browser solve`);
+          const solved = await this.solveChallenge(base);
+          if (!solved) {
+            throw new Error(
+              "Animepahe is behind an anti-bot challenge. Options: install Chrome/Chromium so Seanime\'s ChromeDP can solve it, run FlareSolverr and set solverUrl, or paste your browser cookie + User-Agent into the extension settings."
+            );
+          }
+          const sess = this.loadSession();
+          r = await this.fetchOnce((sess && sess.origin) || base, path, extraHeaders);
+          if (this.isBlocked(r)) throw new Error(`Animepahe still blocked after solving (HTTP ${r.status}); cookie is probably bound to a different IP/User-Agent`);
         }
-        var videoSources = [];
-        for (var i = 0; i < sources.length; i++) {
-            videoSources.push({
-                url: sources[i].url,
-                type: "m3u8",
-                quality: sources[i].quality,
-                subtitles: []
-            });
-        }
-        return {
-            server: server || "kwik",
-            headers: { "Referer": sources[0].referer },
-            videoSources: videoSources
-        };
-    });
-};
+        if (!r.ok) throw new Error(`Animepahe HTTP ${r.status} for ${path}`);
+        this.setBase(r.base);
+        return r;
+      } catch (e) {
+        lastErr = e;
+        const msg = this.why(e);
+        // Only fall through to the next mirror on transport errors.
+        if (/anti-bot|still blocked|HTTP \d+/.test(msg)) throw e;
+        console.log(`[Animepahe] ${base} unreachable: ${msg}`);
+      }
+    }
+    throw lastErr || new Error("Animepahe: no mirror reachable");
+  }
+
+  async fetchOnce(base, path, extraHeaders) {
+    const sess = this.loadSession();
+    const headers = Object.assign(
+      { "User-Agent": this.userAgent(), Referer: `${base}/`, Accept: "*/*" },
+      extraHeaders || {}
+    );
+    const cookie = (sess && sess.cookie && sess.origin === base ? sess.cookie : "") || this.pref("cookie", "");
+    if (cookie) headers.Cookie = cookie;
+    const res = await fetch(`${base}${path}`, { headers, timeout: 30 });
+    return { ok: res.ok, status: res.status, body: res.text() || "", base };
+  }
+
+  isBlocked(r) {
+    if (r.ok && r.body && (r.body.charAt(0) === "{" || r.body.charAt(0) === "[")) return false;
+    if (r.status !== 403 && r.status !== 503 && r.status !== 429 && r.status !== 200) return false;
+    const b = (r.body || "").toLowerCase();
+    return (
+      b.indexOf("just a moment") !== -1 ||
+      b.indexOf("/cdn-cgi/challenge-platform") !== -1 ||
+      b.indexOf("cf-browser-verification") !== -1 ||
+      b.indexOf("attention required! | cloudflare") !== -1 ||
+      b.indexOf("ddos-guard") !== -1 ||
+      b.indexOf("__ddg") !== -1 && !r.ok
+    );
+  }
+
+  // Tries every available bypass in order. Each one ends in saveSession().
+  async solveChallenge(base) {
+    const solver = this.pref("solverUrl", "");
+    if (solver && (await this.solveWithSolver(base, solver))) return true;
+    if (await this.solveWithBrowser(base)) return true;
+    if (!solver) console.log("[Animepahe] tip: set solverUrl (FlareSolverr, e.g. http://127.0.0.1:8191/v1) as a further fallback");
+    return false;
+  }
+
+  saveSession(cookie, ua, origin, how) {
+    $store.set(this.sessionKey, { cookie, ua, origin, at: Date.now() });
+    this.setBase(origin);
+    console.log(`[Animepahe] clearance saved via ${how} for ${origin}`);
+  }
+
+  hostOf(u) { return String(u).replace(/^https?:\/\//, "").replace(/\/.*$/, ""); }
+  cookieMatches(c, host) {
+    const d = String((c && c.domain) || "").replace(/^\./, "");
+    return !!d && (host === d || host.slice(-d.length - 1) === "." + d);
+  }
+
+  // Local FlareSolverr-compatible service. Follows redirects, so .com -> .pw is handled too.
+  async solveWithSolver(base, endpoint) {
+    try {
+      const res = await fetch(endpoint, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ cmd: "request.get", url: `${base}/`, maxTimeout: 60000 }),
+        timeout: 90,
+      });
+      const data = JSON.parse(res.text() || "{}");
+      const sol = data && data.solution;
+      if (!sol || data.status !== "ok") {
+        console.log(`[Animepahe] solver failed: ${(data && data.message) || res.status}`);
+        return false;
+      }
+      const origin = this.origin(sol.url || base);
+      const host = this.hostOf(origin);
+      const cookies = (sol.cookies || []).filter(c => this.cookieMatches(c, host));
+      if (!cookies.some(c => c.name === "cf_clearance" || /^__ddg2_/.test(c.name))) {
+        console.log("[Animepahe] solver returned no clearance cookie");
+        return false;
+      }
+      this.saveSession(cookies.map(c => `${c.name}=${c.value}`).join("; "), sol.userAgent || this.userAgent(), origin, "solver");
+      return true;
+    } catch (e) {
+      console.log(`[Animepahe] solver error: ${this.why(e)}`);
+      return false;
+    }
+  }
+
+  // Real Chrome through Seanime's ChromeDP. Detects where the site redirected to (.com -> .pw).
+  async solveWithBrowser(base) {
+    if (typeof ChromeDP === "undefined" || typeof ChromeDP.newBrowser !== "function") {
+      console.log("[Animepahe] ChromeDP is unavailable");
+      return false;
+    }
+    const ua = this.userAgent();
+    const hosts = this.bases().map(b => this.hostOf(b));
+    let browser;
+    try {
+      browser = await ChromeDP.newBrowser({ timeout: 60, userAgent: ua });
+      try {
+        await browser.navigate(`${base}/`);
+      } catch (e) {
+        console.log(`[Animepahe] navigate: ${this.why(e)} (continuing)`);
+      }
+      for (let i = 0; i < 40; i++) {
+        await browser.sleep(1000);
+        const result = await browser.executeCDP("Network.getAllCookies");
+        const all = Array.isArray(result && result.cookies) ? result.cookies : [];
+        const mine = all.filter(c => hosts.some(h => this.cookieMatches(c, h)));
+        const cleared = mine.find(c => c.name === "cf_clearance" || /^__ddg2_/.test(c.name));
+        if (!cleared) continue;
+        const dom = String(cleared.domain).replace(/^\./, "");
+        let origin = `https://${dom}`;
+        try {
+          const loc = await browser.executeCDP("Runtime.evaluate", { expression: "location.origin", returnByValue: true });
+          const v = loc && loc.result && loc.result.value;
+          if (typeof v === "string" && /^https?:\/\//.test(v) && hosts.some(h => this.cookieMatches({ domain: this.hostOf(v) }, h))) origin = v;
+        } catch (_e) {}
+        const host = this.hostOf(origin);
+        const jar = mine.filter(c => this.cookieMatches(c, host));
+        this.saveSession(jar.map(c => `${c.name}=${c.value}`).join("; "), ua, origin, `browser (~${i + 1}s)`);
+        return true;
+      }
+      console.log("[Animepahe] challenge cookie never appeared");
+      return false;
+    } catch (e) {
+      console.log(`[Animepahe] browser solve failed: ${this.why(e)}`);
+      return false;
+    } finally {
+      if (browser) {
+        try { await browser.close(); } catch (_e) {}
+      }
+    }
+  }
+
+  loadSession() {
+    try { return $store.get(this.sessionKey) || null; } catch (_e) { return null; }
+  }
+
+  userAgent() {
+    const sess = this.loadSession();
+    return (sess && sess.ua) || this.pref("userAgent", "") || this.defaultUA;
+  }
+
+  // ───────────────────────── helpers ─────────────────────────
+
+  pref(name, fallback) {
+    try {
+      const v = $getUserPreference(name);
+      if (typeof v === "string" && v.trim() && v.indexOf("{{") === -1) return v.trim();
+    } catch (_e) {}
+    return fallback;
+  }
+
+  bases() {
+    const configured = this.pref("baseUrl", this.mirrors[0]).replace(/\/+$/, "");
+    const sess = this.loadSession();
+    return this.uniq([sess && sess.origin, configured].concat(this.mirrors));
+  }
+
+  setBase(base) { this._base = base; }
+  currentBase() { return this._base || this.bases()[0]; }
+  origin(u) { const m = String(u).match(/^https?:\/\/[^/]+/i); return m ? m[0] : "https://kwik.si"; }
+  uniq(a) { return a.filter((x, i) => x && a.indexOf(x) === i); }
+  why(e) { return e instanceof Error ? e.message : String(e); }
+}
